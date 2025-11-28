@@ -41,6 +41,7 @@ A production-ready WebSocket server written in Go for real-time chat application
 - **Q&A Chat Memory** - Semantic matching with embeddings (75% similarity threshold)
 - **Audio Message Support** - Store and retrieve audio messages
 - **Connection Management** - Automatic ping/pong and lifecycle handling
+- **Job Management** - Delete completed/failed analysis jobs with cascade profile deletion
 - **Docker Ready** - Containerized for easy deployment
 
 ## Tech Stack
@@ -396,6 +397,7 @@ Server runs on port **8081** by default.
 | GET | `/api/analysis/search` | Search similar resumes |
 | GET | `/api/analysis/user-jobs?user_id=X` | Get user's analysis jobs |
 | GET | `/api/analysis/upload-jobs?upload_id=X` | Get jobs for upload |
+| DELETE | `/api/analysis/delete-job?job_id=X` | Delete job (completed/failed only) |
 
 **Upload with User ID:**
 ```bash
@@ -418,6 +420,29 @@ curl -X POST http://localhost:8081/api/upload \
 **File Constraints:**
 - Maximum size: 10 MB
 - Supported types: PDF, DOC, DOCX
+
+**Delete Job:**
+```bash
+curl -X DELETE "http://localhost:8081/api/analysis/delete-job?job_id=job_abc123"
+```
+
+**Delete Job Response (Success):**
+```json
+{
+  "success": true,
+  "message": "Job deleted successfully",
+  "job_id": "job_abc123"
+}
+```
+
+**Delete Job Response (In Progress - Error):**
+```json
+{
+  "error": "Cannot delete job in progress",
+  "status": "analyzing",
+  "message": "Only completed or failed jobs can be deleted"
+}
+```
 
 ### Interview Preparation
 
@@ -727,6 +752,12 @@ kill -9 <PID>
 3. Check for proxy/firewall blocking WebSocket upgrade
 
 ## Changelog
+
+### Version 1.7.0 (2025-11-28)
+- **Delete Analysis Job** - New endpoint to delete completed/failed jobs
+- **Cascade Profile Deletion** - Deleting a job also removes associated user_profile
+- **Status Validation** - Only allows deletion of completed or failed jobs
+- **Error Handling** - Clear error messages for in-progress job deletion attempts
 
 ### Version 1.6.0 (2025-11-27)
 - **User Authentication** - Signup, login, logout with session tokens

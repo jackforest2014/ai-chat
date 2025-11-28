@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, Suspense } from 'react'
+import { useState, useEffect, Suspense, useRef, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
 import {
@@ -24,9 +24,74 @@ import {
   Clock,
   AlertCircle,
   Play,
-  RefreshCw
+  RefreshCw,
+  Sparkles
 } from 'lucide-react'
 import Link from 'next/link'
+import { ConfirmModal } from '@/components/ui/confirm-modal'
+import { InterviewPrepModal } from '@/components/interview/InterviewPrepModal'
+
+// Animated Progress Bar Component
+function AnimatedProgressBar({ progress, status }: { progress: number; status: string }) {
+  const getGradientColors = () => {
+    if (status === 'queued') return 'from-gray-400 via-gray-500 to-gray-400'
+    return 'from-indigo-500 via-purple-500 to-pink-500'
+  }
+
+  return (
+    <div className="w-full">
+      <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+        {/* Progress fill with gradient and animation */}
+        <div
+          className={`h-full bg-gradient-to-r ${getGradientColors()} rounded-full transition-all duration-500 ease-out relative`}
+          style={{ width: `${Math.max(progress, 2)}%` }}
+        >
+          {/* Shimmer effect */}
+          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer" />
+        </div>
+      </div>
+      <div className="flex justify-between items-center mt-1">
+        <span className="text-xs text-gray-500">{progress}%</span>
+        <span className="text-xs text-indigo-600 font-medium animate-pulse">Processing...</span>
+      </div>
+    </div>
+  )
+}
+
+// Pulsing Status Indicator Component
+function PulsingStatusIndicator({ status }: { status: string }) {
+  const getColors = () => {
+    switch (status) {
+      case 'queued':
+        return { bg: 'bg-gray-400', ring: 'ring-gray-400/30' }
+      case 'extracting_text':
+        return { bg: 'bg-blue-500', ring: 'ring-blue-500/30' }
+      case 'chunking':
+        return { bg: 'bg-indigo-500', ring: 'ring-indigo-500/30' }
+      case 'generating_embeddings':
+        return { bg: 'bg-purple-500', ring: 'ring-purple-500/30' }
+      case 'analyzing':
+        return { bg: 'bg-pink-500', ring: 'ring-pink-500/30' }
+      default:
+        return { bg: 'bg-indigo-500', ring: 'ring-indigo-500/30' }
+    }
+  }
+
+  const colors = getColors()
+
+  return (
+    <div className="relative flex items-center justify-center w-8 h-8">
+      {/* Outer pulsing ring */}
+      <div className={`absolute inset-0 rounded-full ${colors.bg} opacity-20 animate-ping`} />
+      {/* Middle ring */}
+      <div className={`absolute inset-1 rounded-full ${colors.bg} opacity-40 animate-pulse`} />
+      {/* Inner solid circle */}
+      <div className={`relative w-4 h-4 rounded-full ${colors.bg} ring-4 ${colors.ring}`}>
+        <Sparkles className="w-2.5 h-2.5 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+      </div>
+    </div>
+  )
+}
 
 interface UserUpload {
   id: number
@@ -90,6 +155,19 @@ function ProfileContent() {
   const [uploadsExpanded, setUploadsExpanded] = useState(true)
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
+  // Delete confirmation modal state (for uploads)
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
+  const [uploadToDelete, setUploadToDelete] = useState<UserUpload | null>(null)
+
+  // Delete confirmation modal state (for jobs)
+  const [deleteJobModalOpen, setDeleteJobModalOpen] = useState(false)
+  const [jobToDelete, setJobToDelete] = useState<{ job: AnalysisJob; uploadId: number } | null>(null)
+  const [deletingJobId, setDeletingJobId] = useState<string | null>(null)
+
+  // Interview prep modal state
+  const [interviewPrepModalOpen, setInterviewPrepModalOpen] = useState(false)
+  const [interviewPrepJobId, setInterviewPrepJobId] = useState<string | null>(null)
+
   // Jobs state - map of upload_id to jobs
   const [jobsByUpload, setJobsByUpload] = useState<Record<number, AnalysisJob[]>>({})
   const [expandedUploads, setExpandedUploads] = useState<Set<number>>(new Set())
@@ -105,6 +183,100 @@ function ProfileContent() {
   const [theme, setTheme] = useState('light')
 
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8081'
+
+  // Polling interval ref
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Helper to check if a job is in progress (not completed or failed)
+  const isJobInProgress = useCallback((job: AnalysisJob) => {
+    return job.status !== 'completed' && job.status !== 'failed'
+  }, [])
+
+  // Get all expanded uploads that have in-progress jobs
+  const getExpandedUploadsWithInProgressJobs = useCallback(() => {
+    const result: number[] = []
+    expandedUploads.forEach(uploadId => {
+      const jobs = jobsByUpload[uploadId] || []
+      if (jobs.some(isJobInProgress)) {
+        result.push(uploadId)
+      }
+    })
+    return result
+  }, [expandedUploads, jobsByUpload, isJobInProgress])
+
+  // Fetch status for a single job
+  const fetchJobStatus = useCallback(async (jobId: string): Promise<AnalysisJob | null> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/analysis/status?job_id=${jobId}`, {
+        headers: {
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ChatApp/1.0',
+        },
+      })
+      if (!response.ok) return null
+      return await response.json()
+    } catch {
+      return null
+    }
+  }, [backendUrl])
+
+  // Update jobs for expanded uploads with in-progress jobs
+  const updateInProgressJobs = useCallback(async () => {
+    const uploadsToUpdate = getExpandedUploadsWithInProgressJobs()
+    if (uploadsToUpdate.length === 0) return
+
+    for (const uploadId of uploadsToUpdate) {
+      const jobs = jobsByUpload[uploadId] || []
+      const inProgressJobs = jobs.filter(isJobInProgress)
+
+      // Fetch updated status for each in-progress job
+      const updatedJobs = await Promise.all(
+        jobs.map(async (job) => {
+          if (isJobInProgress(job)) {
+            const updated = await fetchJobStatus(job.job_id)
+            if (updated) {
+              return { ...job, ...updated }
+            }
+          }
+          return job
+        })
+      )
+
+      // Update state with new job data
+      setJobsByUpload(prev => ({
+        ...prev,
+        [uploadId]: updatedJobs
+      }))
+    }
+  }, [getExpandedUploadsWithInProgressJobs, jobsByUpload, isJobInProgress, fetchJobStatus])
+
+  // Auto-polling effect for in-progress jobs
+  useEffect(() => {
+    const uploadsWithInProgressJobs = getExpandedUploadsWithInProgressJobs()
+
+    if (uploadsWithInProgressJobs.length > 0) {
+      // Start polling
+      if (!pollingIntervalRef.current) {
+        pollingIntervalRef.current = setInterval(() => {
+          updateInProgressJobs()
+        }, 2000) // Poll every 2 seconds
+      }
+    } else {
+      // Stop polling when no in-progress jobs are visible
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+
+    // Cleanup on unmount
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }, [getExpandedUploadsWithInProgressJobs, updateInProgressJobs])
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -257,8 +429,23 @@ function ProfileContent() {
     )
   }
 
-  const handleDeleteUpload = async (uploadId: number) => {
-    if (!confirm('Are you sure you want to delete this resume and all its analysis jobs?')) return
+  // Open delete confirmation modal
+  const handleDeleteClick = (upload: UserUpload) => {
+    setUploadToDelete(upload)
+    setDeleteModalOpen(true)
+  }
+
+  // Close delete confirmation modal
+  const handleDeleteModalClose = () => {
+    setDeleteModalOpen(false)
+    setUploadToDelete(null)
+  }
+
+  // Perform the actual delete
+  const handleDeleteConfirm = async () => {
+    if (!uploadToDelete) return
+
+    const uploadId = uploadToDelete.id
 
     try {
       setDeletingId(uploadId)
@@ -285,9 +472,12 @@ function ProfileContent() {
           next.delete(uploadId)
           return next
         })
+        // Close modal on success
+        handleDeleteModalClose()
       } else {
         const errorData = await response.json().catch(() => ({ error: 'Delete failed' }))
         console.error('Failed to delete upload:', errorData.error)
+        // Keep modal open and show error - user can try again or cancel
         alert(`Failed to delete: ${errorData.error}`)
       }
     } catch (err) {
@@ -295,6 +485,55 @@ function ProfileContent() {
       alert('Failed to delete upload. Please try again.')
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  // Open job delete confirmation modal
+  const handleDeleteJobClick = (job: AnalysisJob, uploadId: number) => {
+    setJobToDelete({ job, uploadId })
+    setDeleteJobModalOpen(true)
+  }
+
+  // Close job delete confirmation modal
+  const handleDeleteJobModalClose = () => {
+    setDeleteJobModalOpen(false)
+    setJobToDelete(null)
+  }
+
+  // Perform the actual job delete
+  const handleDeleteJobConfirm = async () => {
+    if (!jobToDelete) return
+
+    const { job, uploadId } = jobToDelete
+
+    try {
+      setDeletingJobId(job.job_id)
+      const response = await fetch(`${backendUrl}/api/analysis/delete-job?job_id=${job.job_id}`, {
+        method: 'DELETE',
+        headers: {
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ChatApp/1.0',
+        },
+      })
+
+      if (response.ok) {
+        // Remove job from state
+        setJobsByUpload(prev => ({
+          ...prev,
+          [uploadId]: (prev[uploadId] || []).filter(j => j.job_id !== job.job_id)
+        }))
+        // Close modal on success
+        handleDeleteJobModalClose()
+      } else {
+        const errorData = await response.json().catch(() => ({ error: 'Delete failed' }))
+        console.error('Failed to delete job:', errorData.error)
+        alert(`Failed to delete: ${errorData.error || errorData.message}`)
+      }
+    } catch (err) {
+      console.error('Failed to delete job:', err)
+      alert('Failed to delete job. Please try again.')
+    } finally {
+      setDeletingJobId(null)
     }
   }
 
@@ -585,7 +824,7 @@ function ProfileContent() {
                                       Analyze
                                     </button>
                                     <button
-                                      onClick={() => handleDeleteUpload(upload.id)}
+                                      onClick={() => handleDeleteClick(upload)}
                                       disabled={deletingId === upload.id}
                                       className="p-2 text-red-600 hover:bg-red-100 rounded-lg transition disabled:opacity-50"
                                       title="Delete"
@@ -616,75 +855,121 @@ function ProfileContent() {
                                         {jobs.map((job) => {
                                           const statusBadge = getStatusBadge(job.status)
                                           const StatusIcon = statusBadge.icon
+                                          const jobInProgress = isJobInProgress(job)
 
                                           return (
                                             <div
                                               key={job.job_id}
-                                              className="flex items-center gap-4 pl-12 pr-4 py-3 hover:bg-gray-50 transition"
+                                              className={`pl-12 pr-4 py-3 transition ${
+                                                jobInProgress
+                                                  ? 'bg-gradient-to-r from-indigo-50/50 via-purple-50/30 to-pink-50/50'
+                                                  : 'hover:bg-gray-50'
+                                              }`}
                                             >
-                                              {/* Status Icon */}
-                                              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${statusBadge.bg}`}>
-                                                <StatusIcon className={`w-4 h-4 ${statusBadge.text}`} />
-                                              </div>
+                                              <div className="flex items-center gap-4">
+                                                {/* Status Icon - Animated for in-progress */}
+                                                {jobInProgress ? (
+                                                  <PulsingStatusIndicator status={job.status} />
+                                                ) : (
+                                                  <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${statusBadge.bg}`}>
+                                                    <StatusIcon className={`w-4 h-4 ${statusBadge.text}`} />
+                                                  </div>
+                                                )}
 
-                                              {/* Job Info */}
-                                              <div className="flex-1 min-w-0">
-                                                <div className="flex items-center gap-2">
-                                                  <span className={`text-xs px-2 py-0.5 rounded-full ${statusBadge.bg} ${statusBadge.text}`}>
-                                                    {job.status}
-                                                  </span>
-                                                  {job.status !== 'completed' && job.status !== 'failed' && (
-                                                    <span className="text-xs text-gray-500">
-                                                      {job.progress}%
+                                                {/* Job Info */}
+                                                <div className="flex-1 min-w-0">
+                                                  <div className="flex items-center gap-2">
+                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${statusBadge.bg} ${statusBadge.text}`}>
+                                                      {job.status.replace(/_/g, ' ')}
                                                     </span>
+                                                    {jobInProgress && (
+                                                      <span className="flex items-center gap-1 text-xs text-indigo-600">
+                                                        <RefreshCw className="w-3 h-3 animate-spin" />
+                                                        Auto-updating
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                  <p className={`text-sm mt-1 truncate ${
+                                                    jobInProgress ? 'text-indigo-700 font-medium' : 'text-gray-600'
+                                                  }`}>
+                                                    {job.current_step || 'Waiting...'}
+                                                  </p>
+                                                  <p className="text-xs text-gray-400 mt-0.5">
+                                                    {new Date(job.created_at).toLocaleString()}
+                                                  </p>
+                                                </div>
+
+                                                {/* Job Actions */}
+                                                <div className="flex items-center gap-1">
+                                                  {job.status === 'completed' && (
+                                                    <>
+                                                      <Link
+                                                        href={`/analysis/${job.job_id}`}
+                                                        className="p-2 text-indigo-600 hover:bg-indigo-100 rounded-lg transition"
+                                                        title="View Analysis"
+                                                      >
+                                                        <Brain className="w-4 h-4" />
+                                                      </Link>
+                                                      <button
+                                                        onClick={() => {
+                                                          setInterviewPrepJobId(job.job_id)
+                                                          setInterviewPrepModalOpen(true)
+                                                        }}
+                                                        className="p-2 text-purple-600 hover:bg-purple-100 rounded-lg transition"
+                                                        title="Interview Prep"
+                                                      >
+                                                        <MessageSquare className="w-4 h-4" />
+                                                      </button>
+                                                      <button
+                                                        onClick={() => handleDeleteJobClick(job, upload.id)}
+                                                        disabled={deletingJobId === job.job_id}
+                                                        className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition disabled:opacity-50"
+                                                        title="Delete Job"
+                                                      >
+                                                        {deletingJobId === job.job_id ? (
+                                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                                        ) : (
+                                                          <Trash2 className="w-4 h-4" />
+                                                        )}
+                                                      </button>
+                                                    </>
+                                                  )}
+                                                  {job.status === 'failed' && (
+                                                    <>
+                                                      {job.error_message && (
+                                                        <span
+                                                          className="text-xs text-red-600 max-w-[100px] truncate"
+                                                          title={job.error_message}
+                                                        >
+                                                          {job.error_message}
+                                                        </span>
+                                                      )}
+                                                      <button
+                                                        onClick={() => handleDeleteJobClick(job, upload.id)}
+                                                        disabled={deletingJobId === job.job_id}
+                                                        className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition disabled:opacity-50"
+                                                        title="Delete Job"
+                                                      >
+                                                        {deletingJobId === job.job_id ? (
+                                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                                        ) : (
+                                                          <Trash2 className="w-4 h-4" />
+                                                        )}
+                                                      </button>
+                                                    </>
                                                   )}
                                                 </div>
-                                                <p className="text-sm text-gray-600 mt-1 truncate">
-                                                  {job.current_step || 'Waiting...'}
-                                                </p>
-                                                <p className="text-xs text-gray-400 mt-0.5">
-                                                  {new Date(job.created_at).toLocaleString()}
-                                                </p>
                                               </div>
 
-                                              {/* Job Actions */}
-                                              <div className="flex items-center gap-1">
-                                                {job.status === 'completed' && (
-                                                  <>
-                                                    <Link
-                                                      href={`/analysis/${job.job_id}`}
-                                                      className="p-2 text-indigo-600 hover:bg-indigo-100 rounded-lg transition"
-                                                      title="View Analysis"
-                                                    >
-                                                      <Brain className="w-4 h-4" />
-                                                    </Link>
-                                                    <Link
-                                                      href={`/interview/${job.job_id}`}
-                                                      className="p-2 text-purple-600 hover:bg-purple-100 rounded-lg transition"
-                                                      title="Interview Prep"
-                                                    >
-                                                      <MessageSquare className="w-4 h-4" />
-                                                    </Link>
-                                                  </>
-                                                )}
-                                                {job.status === 'failed' && job.error_message && (
-                                                  <span
-                                                    className="text-xs text-red-600 max-w-[150px] truncate"
-                                                    title={job.error_message}
-                                                  >
-                                                    {job.error_message}
-                                                  </span>
-                                                )}
-                                                {job.status !== 'completed' && job.status !== 'failed' && (
-                                                  <button
-                                                    onClick={() => loadJobsForUpload(upload.id)}
-                                                    className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition"
-                                                    title="Refresh status"
-                                                  >
-                                                    <RefreshCw className="w-4 h-4" />
-                                                  </button>
-                                                )}
-                                              </div>
+                                              {/* Animated Progress Bar for in-progress jobs */}
+                                              {jobInProgress && (
+                                                <div className="mt-3 ml-12">
+                                                  <AnimatedProgressBar
+                                                    progress={job.progress}
+                                                    status={job.status}
+                                                  />
+                                                </div>
+                                              )}
                                             </div>
                                           )
                                         })}
@@ -840,6 +1125,79 @@ function ProfileContent() {
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <ConfirmModal
+        isOpen={deleteModalOpen}
+        onClose={handleDeleteModalClose}
+        onConfirm={handleDeleteConfirm}
+        title="Delete Resume"
+        message={
+          uploadToDelete ? (
+            <div className="space-y-2">
+              <p>Are you sure you want to delete this resume?</p>
+              <p className="font-medium text-gray-900">{uploadToDelete.file_name}</p>
+              <p className="text-sm text-gray-500">
+                This will also delete all associated analysis jobs and cannot be undone.
+              </p>
+            </div>
+          ) : (
+            'Are you sure you want to delete this resume?'
+          )
+        }
+        confirmText="Delete"
+        cancelText="Cancel"
+        variant="danger"
+        isLoading={deletingId !== null}
+      />
+
+      {/* Delete Job Confirmation Modal */}
+      <ConfirmModal
+        isOpen={deleteJobModalOpen}
+        onClose={handleDeleteJobModalClose}
+        onConfirm={handleDeleteJobConfirm}
+        title="Delete Analysis Job"
+        message={
+          jobToDelete ? (
+            <div className="space-y-2">
+              <p>Are you sure you want to delete this analysis job?</p>
+              <div className="bg-gray-50 rounded-lg p-3 text-sm">
+                <p className="text-gray-600">
+                  <span className="font-medium">Status:</span>{' '}
+                  <span className={jobToDelete.job.status === 'completed' ? 'text-green-600' : 'text-red-600'}>
+                    {jobToDelete.job.status}
+                  </span>
+                </p>
+                <p className="text-gray-600 mt-1">
+                  <span className="font-medium">Created:</span>{' '}
+                  {new Date(jobToDelete.job.created_at).toLocaleString()}
+                </p>
+              </div>
+              <p className="text-sm text-gray-500">
+                This will also delete the associated profile data and cannot be undone.
+              </p>
+            </div>
+          ) : (
+            'Are you sure you want to delete this analysis job?'
+          )
+        }
+        confirmText="Delete"
+        cancelText="Cancel"
+        variant="danger"
+        isLoading={deletingJobId !== null}
+      />
+
+      {/* Interview Prep Modal */}
+      {interviewPrepJobId && (
+        <InterviewPrepModal
+          isOpen={interviewPrepModalOpen}
+          onClose={() => {
+            setInterviewPrepModalOpen(false)
+            setInterviewPrepJobId(null)
+          }}
+          jobId={interviewPrepJobId}
+        />
+      )}
     </div>
   )
 }

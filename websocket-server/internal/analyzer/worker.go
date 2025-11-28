@@ -103,6 +103,11 @@ func (a *DefaultResumeAnalyzer) GetJobsByUploadID(ctx context.Context, uploadID 
 	return a.analysisRepo.GetJobsByUploadID(ctx, uploadID)
 }
 
+// DeleteJob deletes a single analysis job and its associated profile
+func (a *DefaultResumeAnalyzer) DeleteJob(ctx context.Context, jobID string) error {
+	return a.analysisRepo.DeleteJob(ctx, jobID)
+}
+
 // processJob processes a resume analysis job asynchronously
 func (a *DefaultResumeAnalyzer) processJob(jobID string, upload *models.Upload) {
 	// Acquire semaphore slot

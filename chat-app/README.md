@@ -34,6 +34,9 @@ A modern chat application built with Next.js 15, React 19, and TypeScript. Featu
 - **Audio Messages** - Voice recording with MediaRecorder API
 - **Responsive Design** - Works on all devices
 - **Auto-Reconnect** - Exponential backoff reconnection (2s → 30s max)
+- **Reusable UI Components** - ConfirmModal for consistent delete confirmations
+- **Auto-Updating Job Status** - Real-time progress updates for in-progress jobs
+- **Job Management** - Delete completed/failed analysis jobs with confirmation
 
 ## Tech Stack
 
@@ -78,9 +81,13 @@ chat-app/
 │   │   ├── upload/                # Upload components
 │   │   │   ├── UploadForm.tsx     # Drag-and-drop upload
 │   │   │   ├── AnalysisProgress.tsx  # Job status polling
-│   │   │   ├── AnalysisResult.tsx    # Profile display
+│   │   │   └── AnalysisResult.tsx    # Profile display
+│   │   ├── interview/             # Interview components
 │   │   │   └── InterviewPrepModal.tsx  # Job details form
 │   │   └── ui/                    # Reusable UI components
+│   │       ├── button.tsx         # Button component
+│   │       ├── confirm-modal.tsx  # Reusable confirmation modal
+│   │       └── ...                # Other UI components
 │   ├── contexts/
 │   │   └── AuthContext.tsx        # Authentication state & methods
 │   ├── hooks/
@@ -168,6 +175,8 @@ pnpm start
    - View account information and activity stats
    - Manage uploaded resumes and analysis jobs
    - Profile and Settings tabs
+   - Delete resumes and individual analysis jobs
+   - Quick access to Interview Prep modal from job entries
 
 ### Chat Interface
 
@@ -206,7 +215,19 @@ pnpm start
    - Steps: Queued → Extracting Text → Chunking → Embeddings → AI Analysis → Completed
    - Results saved to `/analysis/[jobId]`
 
-3. **View Results:**
+3. **Auto-Updating Job Status (Profile Page):**
+   - Expand a resume to see its analysis jobs
+   - In-progress jobs automatically update every 2 seconds
+   - Animated progress bar with gradient and shimmer effect
+   - Pulsing status indicator with color-coded stages
+   - Polling stops when jobs are collapsed (folded)
+
+4. **Job Management:**
+   - Delete completed or failed jobs via trash icon
+   - Custom confirmation modal (not browser popup)
+   - Deletes associated profile data
+
+5. **View Results:**
    - Personal info (name, email, phone, location)
    - Skills (technical & soft)
    - Work experience with dates
@@ -217,7 +238,8 @@ pnpm start
 
 1. **Generate Questions:**
    - From analysis page, click "Prepare for Interview"
-   - Fill in job details (title, level, company, requirements)
+   - Or from profile page, click Interview Prep icon on any completed job
+   - Fill in job details (title, level, company, requirements) via popup modal
    - AI generates 10 personalized questions with answers
 
 2. **Categories:**
@@ -329,6 +351,7 @@ POST /api/auth/signup
 | GET | `/api/analysis/status?job_id=X` | Get analysis progress |
 | GET | `/api/analysis/result?job_id=X` | Get analysis result |
 | GET | `/api/analysis/upload-jobs?upload_id=X` | Get jobs for upload |
+| DELETE | `/api/analysis/delete-job?job_id=X` | Delete completed/failed job |
 
 ### Interview Endpoints
 

@@ -27,4 +27,5 @@ type AnalysisRepository interface {
 	// Delete operations
 	DeleteJobsByUploadID(ctx context.Context, uploadID int) error
 	DeleteProfilesByUploadID(ctx context.Context, uploadID int) error
+	DeleteJob(ctx context.Context, jobID string) error
 }

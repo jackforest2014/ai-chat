@@ -576,3 +576,31 @@ func (r *AnalysisPostgresRepository) DeleteProfilesByUploadID(ctx context.Contex
 
 	return nil
 }
+
+// DeleteJob deletes a single analysis job and its associated profile by job_id
+func (r *AnalysisPostgresRepository) DeleteJob(ctx context.Context, jobID string) error {
+	// First delete the associated profile (if any)
+	profileQuery := `DELETE FROM user_profile WHERE job_id = $1`
+	_, err := r.db.ExecContext(ctx, profileQuery, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to delete profile for job %s: %w", jobID, err)
+	}
+
+	// Then delete the job itself
+	jobQuery := `DELETE FROM analysis_jobs WHERE job_id = $1`
+	result, err := r.db.ExecContext(ctx, jobQuery, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to delete job %s: %w", jobID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("job not found: %s", jobID)
+	}
+
+	return nil
+}

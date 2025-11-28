@@ -254,3 +254,56 @@ func (h *AnalysisHandler) HandleGetUploadJobs(w http.ResponseWriter, r *http.Req
 		"jobs":      jobs,
 	})
 }
+
+// HandleDeleteJob deletes a single analysis job and its associated profile
+func (h *AnalysisHandler) HandleDeleteJob(w http.ResponseWriter, r *http.Request) {
+	// Only allow DELETE requests
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get job ID from query parameter
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Job ID is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	// First check if the job exists and get its status
+	status, err := h.analyzer.GetStatus(ctx, jobID)
+	if err != nil {
+		log.Printf("Error getting job status for deletion: %v", err)
+		respondJSON(w, http.StatusNotFound, map[string]string{"error": "Job not found"})
+		return
+	}
+
+	// Only allow deletion of completed or failed jobs
+	if status.Status != "completed" && status.Status != "failed" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "Cannot delete job in progress",
+			"status":  status.Status,
+			"message": "Only completed or failed jobs can be deleted",
+		})
+		return
+	}
+
+	// Delete the job
+	err = h.analyzer.DeleteJob(ctx, jobID)
+	if err != nil {
+		log.Printf("Error deleting job %s: %v", jobID, err)
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to delete job"})
+		return
+	}
+
+	log.Printf("Deleted analysis job: %s", jobID)
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Job deleted successfully",
+		"job_id":  jobID,
+	})
+}

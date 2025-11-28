@@ -25,6 +25,9 @@ type ResumeAnalyzer interface {
 
 	// GetJobsByUploadID retrieves all analysis jobs for a specific upload
 	GetJobsByUploadID(ctx context.Context, uploadID int) ([]*models.AnalysisJob, error)
+
+	// DeleteJob deletes a single analysis job and its associated profile
+	DeleteJob(ctx context.Context, jobID string) error
 }
 
 // TextExtractor extracts text content from various file formats
