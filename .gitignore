@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+.next/
+dist/
+*.exe
+main
+server
+websocket-server/main
+websocket-server/server
+websocket-server/websocket-server
+
+# Environment files with secrets
+.env
+.env.local
+*.log
+
+# Python virtual environment
+chromadb-env/
+
+# ChromaDB data (optional - may want to exclude if large)
+chromadb_data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Compiled binaries in websocket-server
+websocket-server/bin/
+
