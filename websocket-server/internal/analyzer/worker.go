@@ -108,6 +108,63 @@ func (a *DefaultResumeAnalyzer) DeleteJob(ctx context.Context, jobID string) err
 	return a.analysisRepo.DeleteJob(ctx, jobID)
 }
 
+// RetryJob resets a failed job and reprocesses it
+func (a *DefaultResumeAnalyzer) RetryJob(ctx context.Context, jobID string) error {
+	// Get the job to validate it exists and check status
+	job, err := a.analysisRepo.GetJobByID(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("job not found: %w", err)
+	}
+
+	// Only allow retry of failed jobs
+	if job.Status != "failed" {
+		return fmt.Errorf("only failed jobs can be retried, current status: %s", job.Status)
+	}
+
+	// Get the upload information
+	upload, err := a.uploadRepo.GetUploadByID(ctx, job.UploadID)
+	if err != nil {
+		return fmt.Errorf("upload not found: %w", err)
+	}
+
+	// Reset the job to queued status
+	if err := a.analysisRepo.ResetJobForRetry(ctx, jobID); err != nil {
+		return fmt.Errorf("failed to reset job: %w", err)
+	}
+
+	log.Printf("Retrying analysis job %s for upload %d", jobID, upload.ID)
+
+	// Start async worker with existing processJob method
+	go a.processJob(jobID, upload)
+
+	return nil
+}
+
+// BatchDeleteJobs deletes multiple analysis jobs and their associated profiles
+func (a *DefaultResumeAnalyzer) BatchDeleteJobs(ctx context.Context, jobIDs []string) (*BatchDeleteResult, error) {
+	if len(jobIDs) == 0 {
+		return &BatchDeleteResult{
+			Success:      true,
+			DeletedCount: 0,
+			DeletedJobs:  []string{},
+			Message:      "No jobs to delete",
+		}, nil
+	}
+
+	// Call repository method to delete jobs
+	deletedJobs, err := a.analysisRepo.BatchDeleteJobs(ctx, jobIDs)
+	if err != nil {
+		return nil, fmt.Errorf("batch deletion failed: %w", err)
+	}
+
+	return &BatchDeleteResult{
+		Success:      true,
+		DeletedCount: len(deletedJobs),
+		DeletedJobs:  deletedJobs,
+		Message:      fmt.Sprintf("Successfully deleted %d job(s)", len(deletedJobs)),
+	}, nil
+}
+
 // processJob processes a resume analysis job asynchronously
 func (a *DefaultResumeAnalyzer) processJob(jobID string, upload *models.Upload) {
 	// Acquire semaphore slot

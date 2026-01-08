@@ -28,6 +28,20 @@ type ResumeAnalyzer interface {
 
 	// DeleteJob deletes a single analysis job and its associated profile
 	DeleteJob(ctx context.Context, jobID string) error
+
+	// RetryJob resets a failed job and reprocesses it
+	RetryJob(ctx context.Context, jobID string) error
+
+	// BatchDeleteJobs deletes multiple analysis jobs and their associated profiles
+	BatchDeleteJobs(ctx context.Context, jobIDs []string) (*BatchDeleteResult, error)
+}
+
+// BatchDeleteResult contains the result of a batch delete operation
+type BatchDeleteResult struct {
+	Success      bool     `json:"success"`
+	DeletedCount int      `json:"deleted_count"`
+	DeletedJobs  []string `json:"deleted_jobs"`
+	Message      string   `json:"message"`
 }
 
 // TextExtractor extracts text content from various file formats

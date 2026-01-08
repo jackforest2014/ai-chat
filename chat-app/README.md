@@ -36,7 +36,9 @@ A modern chat application built with Next.js 15, React 19, and TypeScript. Featu
 - **Auto-Reconnect** - Exponential backoff reconnection (2s → 30s max)
 - **Reusable UI Components** - ConfirmModal for consistent delete confirmations
 - **Auto-Updating Job Status** - Real-time progress updates for in-progress jobs
-- **Job Management** - Delete completed/failed analysis jobs with confirmation
+- **Job Management** - Delete, retry, batch delete, and export analysis jobs
+- **Export Results** - Download analysis in JSON, CSV, PDF, or DOCX formats
+- **Batch Operations** - Select and delete multiple jobs at once
 
 ## Tech Stack
 
@@ -223,9 +225,12 @@ pnpm start
    - Polling stops when jobs are collapsed (folded)
 
 4. **Job Management:**
-   - Delete completed or failed jobs via trash icon
-   - Custom confirmation modal (not browser popup)
-   - Deletes associated profile data
+   - **Delete** - Remove completed or failed jobs via trash icon
+   - **Retry** - Retry failed jobs to reprocess from scratch
+   - **Export** - Download analysis results in multiple formats (JSON/CSV/PDF/DOCX)
+   - **Batch Delete** - Select multiple jobs with checkboxes and delete in one click
+   - Custom confirmation modals (not browser popups)
+   - Operations delete associated profile data
 
 5. **View Results:**
    - Personal info (name, email, phone, location)
@@ -352,6 +357,9 @@ POST /api/auth/signup
 | GET | `/api/analysis/result?job_id=X` | Get analysis result |
 | GET | `/api/analysis/upload-jobs?upload_id=X` | Get jobs for upload |
 | DELETE | `/api/analysis/delete-job?job_id=X` | Delete completed/failed job |
+| POST | `/api/analysis/retry-job?job_id=X` | Retry failed analysis job |
+| POST | `/api/analysis/batch-delete` | Batch delete multiple jobs |
+| GET | `/api/analysis/export?job_id=X&format=Y` | Export analysis (json/csv/pdf/docx) |
 
 ### Interview Endpoints
 

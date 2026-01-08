@@ -25,7 +25,8 @@ import {
   AlertCircle,
   Play,
   RefreshCw,
-  Sparkles
+  Sparkles,
+  Download
 } from 'lucide-react'
 import Link from 'next/link'
 import { ConfirmModal } from '@/components/ui/confirm-modal'
@@ -164,6 +165,19 @@ function ProfileContent() {
   const [jobToDelete, setJobToDelete] = useState<{ job: AnalysisJob; uploadId: number } | null>(null)
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null)
 
+  // Retry confirmation modal state (for failed jobs)
+  const [retryJobModalOpen, setRetryJobModalOpen] = useState(false)
+  const [jobToRetry, setJobToRetry] = useState<{ job: AnalysisJob; uploadId: number } | null>(null)
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
+
+  // Export dropdown state
+  const [exportDropdownOpen, setExportDropdownOpen] = useState<string | null>(null)
+
+  // Batch delete state
+  const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set())
+  const [batchDeleteModalOpen, setBatchDeleteModalOpen] = useState(false)
+  const [deletingBatch, setDeletingBatch] = useState(false)
+
   // Interview prep modal state
   const [interviewPrepModalOpen, setInterviewPrepModalOpen] = useState(false)
   const [interviewPrepJobId, setInterviewPrepJobId] = useState<string | null>(null)
@@ -291,6 +305,28 @@ function ProfileContent() {
       loadUploads()
     }
   }, [user?.id])
+
+  // Clear selection when uploads are collapsed
+  useEffect(() => {
+    setSelectedJobs(prev => {
+      const newSet = new Set(prev)
+      // Remove jobs from collapsed uploads
+      Array.from(newSet).forEach(jobId => {
+        const job = Object.values(jobsByUpload)
+          .flat()
+          .find(j => j.job_id === jobId)
+        if (job) {
+          const uploadId = Object.keys(jobsByUpload).find(key =>
+            jobsByUpload[parseInt(key)].some(j => j.job_id === jobId)
+          )
+          if (uploadId && !expandedUploads.has(parseInt(uploadId))) {
+            newSet.delete(jobId)
+          }
+        }
+      })
+      return newSet
+    })
+  }, [expandedUploads, jobsByUpload])
 
   const loadUploads = async () => {
     if (!user?.id) return
@@ -534,6 +570,216 @@ function ProfileContent() {
       alert('Failed to delete job. Please try again.')
     } finally {
       setDeletingJobId(null)
+    }
+  }
+
+  // Open retry confirmation modal
+  const handleRetryJobClick = (job: AnalysisJob, uploadId: number) => {
+    setJobToRetry({ job, uploadId })
+    setRetryJobModalOpen(true)
+  }
+
+  // Close retry confirmation modal
+  const handleRetryJobModalClose = () => {
+    setRetryJobModalOpen(false)
+    setJobToRetry(null)
+  }
+
+  // Perform the actual job retry
+  const handleRetryJobConfirm = async () => {
+    if (!jobToRetry) return
+
+    const { job, uploadId } = jobToRetry
+
+    try {
+      setRetryingJobId(job.job_id)
+      const response = await fetch(`${backendUrl}/api/analysis/retry-job?job_id=${job.job_id}`, {
+        method: 'POST',
+        headers: {
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ChatApp/1.0',
+        },
+      })
+
+      if (response.ok) {
+        // Update job status in state to 'queued'
+        setJobsByUpload(prev => ({
+          ...prev,
+          [uploadId]: (prev[uploadId] || []).map(j =>
+            j.job_id === job.job_id
+              ? { ...j, status: 'queued', progress: 0, current_step: 'Job queued for processing', error_message: undefined }
+              : j
+          )
+        }))
+        // Close modal on success
+        handleRetryJobModalClose()
+      } else {
+        const errorData = await response.json().catch(() => ({ error: 'Retry failed' }))
+        console.error('Failed to retry job:', errorData.error)
+        alert(`Failed to retry: ${errorData.error || errorData.message}`)
+      }
+    } catch (err) {
+      console.error('Failed to retry job:', err)
+      alert('Failed to retry job. Please try again.')
+    } finally {
+      setRetryingJobId(null)
+    }
+  }
+
+  // Handle export download
+  const handleExport = async (jobId: string, format: string) => {
+    try {
+      setExportDropdownOpen(null) // Close dropdown
+      const response = await fetch(`${backendUrl}/api/analysis/export?job_id=${jobId}&format=${format}`, {
+        headers: {
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ChatApp/1.0',
+        },
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Export failed' }))
+        console.error('Export failed:', errorData.error)
+        alert(`Export failed: ${errorData.error || errorData.message}`)
+        return
+      }
+
+      // Get the filename from Content-Disposition header
+      const contentDisposition = response.headers.get('Content-Disposition')
+      let filename = `resume_analysis_${jobId}.${format}`
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename=(.+)/)
+        if (filenameMatch) {
+          filename = filenameMatch[1]
+        }
+      }
+
+      // Download the file
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Export failed:', err)
+      alert('Export failed. Please try again.')
+    }
+  }
+
+  // Helper function to check if job is deletable (completed or failed)
+  const isDeletable = (status: string) => {
+    return status === 'completed' || status === 'failed'
+  }
+
+  // Get all deletable jobs for an upload
+  const getDeletableJobsForUpload = (uploadId: number): AnalysisJob[] => {
+    const jobs = jobsByUpload[uploadId] || []
+    return jobs.filter(job => isDeletable(job.status))
+  }
+
+  // Handle individual job selection
+  const handleJobSelection = (jobId: string, checked: boolean) => {
+    setSelectedJobs(prev => {
+      const newSet = new Set(prev)
+      if (checked) {
+        newSet.add(jobId)
+      } else {
+        newSet.delete(jobId)
+      }
+      return newSet
+    })
+  }
+
+  // Handle select all for an upload
+  const handleSelectAllForUpload = (uploadId: number, checked: boolean) => {
+    const deletableJobs = getDeletableJobsForUpload(uploadId)
+    setSelectedJobs(prev => {
+      const newSet = new Set(prev)
+      if (checked) {
+        deletableJobs.forEach(job => newSet.add(job.job_id))
+      } else {
+        deletableJobs.forEach(job => newSet.delete(job.job_id))
+      }
+      return newSet
+    })
+  }
+
+  // Check if all deletable jobs for an upload are selected
+  const areAllDeletableSelected = (uploadId: number): boolean => {
+    const deletableJobs = getDeletableJobsForUpload(uploadId)
+    if (deletableJobs.length === 0) return false
+    return deletableJobs.every(job => selectedJobs.has(job.job_id))
+  }
+
+  // Get count of selected jobs for an upload
+  const getSelectedCountForUpload = (uploadId: number): number => {
+    const jobs = jobsByUpload[uploadId] || []
+    return jobs.filter(job => selectedJobs.has(job.job_id)).length
+  }
+
+  // Handle batch delete button click
+  const handleBatchDeleteClick = () => {
+    if (selectedJobs.size === 0) return
+    setBatchDeleteModalOpen(true)
+  }
+
+  // Handle batch delete confirmation
+  const handleBatchDeleteConfirm = async () => {
+    setDeletingBatch(true)
+    setBatchDeleteModalOpen(false)
+
+    try {
+      const response = await fetch(`${backendUrl}/api/analysis/batch-delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
+          'User-Agent': 'ChatApp/1.0',
+        },
+        body: JSON.stringify({
+          job_ids: Array.from(selectedJobs)
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.message || 'Batch deletion failed')
+      }
+
+      const result = await response.json()
+
+      // Optimistic UI update: remove deleted jobs from all uploads
+      setJobsByUpload(prev => {
+        const updated = { ...prev }
+        Object.keys(updated).forEach(uploadIdStr => {
+          const uploadId = parseInt(uploadIdStr)
+          updated[uploadId] = updated[uploadId].filter(
+            job => !selectedJobs.has(job.job_id)
+          )
+        })
+        return updated
+      })
+
+      // Clear selection
+      setSelectedJobs(new Set())
+
+      // Show success message
+      alert(`Successfully deleted ${result.deleted_count} job(s)`)
+    } catch (error) {
+      console.error('Batch delete error:', error)
+      alert('Failed to delete jobs. Please try again.')
+
+      // Refresh to show actual state
+      const expandedArray = Array.from(expandedUploads)
+      expandedArray.forEach(uploadId => {
+        loadJobsForUpload(uploadId)
+      })
+    } finally {
+      setDeletingBatch(false)
     }
   }
 
@@ -851,7 +1097,42 @@ function ProfileContent() {
                                         No analysis jobs yet. Click &quot;Analyze&quot; to start one.
                                       </div>
                                     ) : (
-                                      <div className="divide-y divide-gray-100">
+                                      <>
+                                        {/* Batch Actions Bar - Only show when upload is expanded and has jobs */}
+                                        {jobs.length > 0 && (
+                                          <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                              <input
+                                                type="checkbox"
+                                                checked={areAllDeletableSelected(upload.id)}
+                                                onChange={(e) => handleSelectAllForUpload(upload.id, e.target.checked)}
+                                                disabled={getDeletableJobsForUpload(upload.id).length === 0}
+                                                className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                                title="Select all deletable jobs"
+                                              />
+                                              <span className="text-sm text-gray-600">
+                                                {getSelectedCountForUpload(upload.id) > 0
+                                                  ? `${getSelectedCountForUpload(upload.id)} selected`
+                                                  : 'Select all'}
+                                              </span>
+                                            </div>
+                                            {getSelectedCountForUpload(upload.id) > 0 && (
+                                              <button
+                                                onClick={handleBatchDeleteClick}
+                                                disabled={deletingBatch}
+                                                className="flex items-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition disabled:opacity-50"
+                                              >
+                                                {deletingBatch ? (
+                                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                                ) : (
+                                                  <Trash2 className="w-4 h-4" />
+                                                )}
+                                                Delete Selected ({getSelectedCountForUpload(upload.id)})
+                                              </button>
+                                            )}
+                                          </div>
+                                        )}
+                                        <div className="divide-y divide-gray-100">
                                         {jobs.map((job) => {
                                           const statusBadge = getStatusBadge(job.status)
                                           const StatusIcon = statusBadge.icon
@@ -860,13 +1141,27 @@ function ProfileContent() {
                                           return (
                                             <div
                                               key={job.job_id}
-                                              className={`pl-12 pr-4 py-3 transition ${
+                                              className={`pr-4 py-3 transition ${
                                                 jobInProgress
                                                   ? 'bg-gradient-to-r from-indigo-50/50 via-purple-50/30 to-pink-50/50'
+                                                  : selectedJobs.has(job.job_id)
+                                                  ? 'bg-indigo-50'
                                                   : 'hover:bg-gray-50'
                                               }`}
                                             >
                                               <div className="flex items-center gap-4">
+                                                {/* Checkbox for batch selection */}
+                                                <div className="flex-shrink-0 pl-4">
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={selectedJobs.has(job.job_id)}
+                                                    onChange={(e) => handleJobSelection(job.job_id, e.target.checked)}
+                                                    disabled={!isDeletable(job.status)}
+                                                    className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-30"
+                                                    onClick={(e) => e.stopPropagation()}
+                                                  />
+                                                </div>
+
                                                 {/* Status Icon - Animated for in-progress */}
                                                 {jobInProgress ? (
                                                   <PulsingStatusIndicator status={job.status} />
@@ -920,6 +1215,43 @@ function ProfileContent() {
                                                       >
                                                         <MessageSquare className="w-4 h-4" />
                                                       </button>
+                                                      <div className="relative">
+                                                        <button
+                                                          onClick={() => setExportDropdownOpen(exportDropdownOpen === job.job_id ? null : job.job_id)}
+                                                          className="p-2 text-green-600 hover:bg-green-100 rounded-lg transition"
+                                                          title="Export"
+                                                        >
+                                                          <Download className="w-4 h-4" />
+                                                        </button>
+                                                        {exportDropdownOpen === job.job_id && (
+                                                          <div className="absolute right-0 top-10 bg-white border border-gray-200 rounded-lg shadow-lg z-10 min-w-[120px]">
+                                                            <button
+                                                              onClick={() => handleExport(job.job_id, 'json')}
+                                                              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 rounded-t-lg"
+                                                            >
+                                                              JSON
+                                                            </button>
+                                                            <button
+                                                              onClick={() => handleExport(job.job_id, 'csv')}
+                                                              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+                                                            >
+                                                              CSV
+                                                            </button>
+                                                            <button
+                                                              onClick={() => handleExport(job.job_id, 'pdf')}
+                                                              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+                                                            >
+                                                              PDF
+                                                            </button>
+                                                            <button
+                                                              onClick={() => handleExport(job.job_id, 'docx')}
+                                                              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 rounded-b-lg"
+                                                            >
+                                                              DOCX
+                                                            </button>
+                                                          </div>
+                                                        )}
+                                                      </div>
                                                       <button
                                                         onClick={() => handleDeleteJobClick(job, upload.id)}
                                                         disabled={deletingJobId === job.job_id}
@@ -945,6 +1277,18 @@ function ProfileContent() {
                                                         </span>
                                                       )}
                                                       <button
+                                                        onClick={() => handleRetryJobClick(job, upload.id)}
+                                                        disabled={retryingJobId === job.job_id}
+                                                        className="p-2 text-blue-600 hover:bg-blue-100 rounded-lg transition disabled:opacity-50"
+                                                        title="Retry Job"
+                                                      >
+                                                        {retryingJobId === job.job_id ? (
+                                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                                        ) : (
+                                                          <RefreshCw className="w-4 h-4" />
+                                                        )}
+                                                      </button>
+                                                      <button
                                                         onClick={() => handleDeleteJobClick(job, upload.id)}
                                                         disabled={deletingJobId === job.job_id}
                                                         className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition disabled:opacity-50"
@@ -963,7 +1307,7 @@ function ProfileContent() {
 
                                               {/* Animated Progress Bar for in-progress jobs */}
                                               {jobInProgress && (
-                                                <div className="mt-3 ml-12">
+                                                <div className="mt-3 ml-16">
                                                   <AnimatedProgressBar
                                                     progress={job.progress}
                                                     status={job.status}
@@ -974,6 +1318,7 @@ function ProfileContent() {
                                           )
                                         })}
                                       </div>
+                                      </>
                                     )}
                                   </div>
                                 )}
@@ -1185,6 +1530,85 @@ function ProfileContent() {
         cancelText="Cancel"
         variant="danger"
         isLoading={deletingJobId !== null}
+      />
+
+      {/* Retry Job Confirmation Modal */}
+      <ConfirmModal
+        isOpen={retryJobModalOpen}
+        onClose={handleRetryJobModalClose}
+        onConfirm={handleRetryJobConfirm}
+        title="Retry Analysis Job"
+        message={
+          jobToRetry ? (
+            <div className="space-y-2">
+              <p>Are you sure you want to retry this failed analysis job?</p>
+              <div className="bg-blue-50 rounded-lg p-3 text-sm">
+                <p className="text-gray-600">
+                  <span className="font-medium">Job ID:</span>{' '}
+                  <span className="text-blue-600 font-mono text-xs">{jobToRetry.job.job_id}</span>
+                </p>
+                {jobToRetry.job.error_message && (
+                  <p className="text-red-600 mt-2">
+                    <span className="font-medium">Previous Error:</span>{' '}
+                    {jobToRetry.job.error_message}
+                  </p>
+                )}
+                <p className="text-gray-600 mt-1">
+                  <span className="font-medium">Created:</span>{' '}
+                  {new Date(jobToRetry.job.created_at).toLocaleString()}
+                </p>
+              </div>
+              <p className="text-sm text-gray-500">
+                The job will be reset and reprocessed from the beginning. Previous analysis data will be cleared.
+              </p>
+            </div>
+          ) : (
+            'Are you sure you want to retry this analysis job?'
+          )
+        }
+        confirmText="Retry Job"
+        cancelText="Cancel"
+        variant="info"
+        isLoading={retryingJobId !== null}
+      />
+
+      {/* Batch Delete Confirmation Modal */}
+      <ConfirmModal
+        isOpen={batchDeleteModalOpen}
+        onClose={() => setBatchDeleteModalOpen(false)}
+        onConfirm={handleBatchDeleteConfirm}
+        title="Delete Multiple Jobs"
+        message={
+          <div className="space-y-2">
+            <p>Are you sure you want to delete {selectedJobs.size} job(s)? This action cannot be undone.</p>
+            <div className="mt-4 max-h-48 overflow-y-auto">
+              <p className="text-sm text-gray-600 mb-2">Jobs to be deleted:</p>
+              <ul className="space-y-1">
+                {Array.from(selectedJobs).slice(0, 10).map(jobId => {
+                  // Find the job to show details
+                  const job = Object.values(jobsByUpload)
+                    .flat()
+                    .find(j => j.job_id === jobId)
+
+                  return (
+                    <li key={jobId} className="text-sm text-gray-700">
+                      • Job {jobId.slice(0, 8)}... {job ? `(${job.status})` : ''}
+                    </li>
+                  )
+                })}
+                {selectedJobs.size > 10 && (
+                  <li className="text-sm text-gray-500 italic">
+                    ...and {selectedJobs.size - 10} more
+                  </li>
+                )}
+              </ul>
+            </div>
+          </div>
+        }
+        confirmText="Delete All"
+        cancelText="Cancel"
+        variant="danger"
+        isLoading={deletingBatch}
       />
 
       {/* Interview Prep Modal */}

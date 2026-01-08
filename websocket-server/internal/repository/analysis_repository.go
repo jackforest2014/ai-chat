@@ -28,4 +28,8 @@ type AnalysisRepository interface {
 	DeleteJobsByUploadID(ctx context.Context, uploadID int) error
 	DeleteProfilesByUploadID(ctx context.Context, uploadID int) error
 	DeleteJob(ctx context.Context, jobID string) error
+	BatchDeleteJobs(ctx context.Context, jobIDs []string) ([]string, error)
+
+	// Retry operations
+	ResetJobForRetry(ctx context.Context, jobID string) error
 }

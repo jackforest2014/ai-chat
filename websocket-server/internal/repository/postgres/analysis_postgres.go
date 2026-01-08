@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/lib/pq"
 	"github.com/your-org/websocket-server/internal/repository"
 	"github.com/your-org/websocket-server/pkg/models"
 )
@@ -604,3 +605,132 @@ func (r *AnalysisPostgresRepository) DeleteJob(ctx context.Context, jobID string
 
 	return nil
 }
+
+// ResetJobForRetry resets a failed job back to queued status for retry
+func (r *AnalysisPostgresRepository) ResetJobForRetry(ctx context.Context, jobID string) error {
+	// First delete any associated profile from previous failed attempt
+	profileQuery := `DELETE FROM user_profile WHERE job_id = $1`
+	_, err := r.db.ExecContext(ctx, profileQuery, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to delete profile for job %s: %w", jobID, err)
+	}
+
+	// Reset the job to queued status
+	jobQuery := `
+		UPDATE analysis_jobs
+		SET status = 'queued',
+		    progress = 0,
+		    current_step = '',
+		    error_message = NULL,
+		    completed_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE job_id = $1
+	`
+
+	result, err := r.db.ExecContext(ctx, jobQuery, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to reset job %s: %w", jobID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("job not found: %s", jobID)
+	}
+
+	return nil
+}
+
+// BatchDeleteJobs deletes multiple analysis jobs and their associated profiles in a transaction
+func (r *AnalysisPostgresRepository) BatchDeleteJobs(ctx context.Context, jobIDs []string) ([]string, error) {
+	if len(jobIDs) == 0 {
+		return []string{}, nil
+	}
+
+	// Start transaction
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Step 1: Verify all jobs exist and are deletable (completed or failed)
+	verifyQuery := `
+		SELECT job_id, status
+		FROM analysis_jobs
+		WHERE job_id = ANY($1)
+	`
+
+	rows, err := tx.QueryContext(ctx, verifyQuery, pq.Array(jobIDs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var nonDeletableJobs []string
+	jobsFound := make(map[string]bool)
+
+	for rows.Next() {
+		var jobID, status string
+		if err := rows.Scan(&jobID, &status); err != nil {
+			return nil, fmt.Errorf("failed to scan job: %w", err)
+		}
+
+		jobsFound[jobID] = true
+
+		// Only completed and failed jobs can be deleted
+		if status != "completed" && status != "failed" {
+			nonDeletableJobs = append(nonDeletableJobs, jobID)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating jobs: %w", err)
+	}
+
+	// Check if any jobs cannot be deleted
+	if len(nonDeletableJobs) > 0 {
+		return nil, fmt.Errorf("cannot delete %d jobs that are still processing", len(nonDeletableJobs))
+	}
+
+	// Step 2: Delete associated profiles
+	profileQuery := `DELETE FROM user_profile WHERE job_id = ANY($1)`
+	_, err = tx.ExecContext(ctx, profileQuery, pq.Array(jobIDs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete profiles: %w", err)
+	}
+
+	// Step 3: Delete jobs
+	jobQuery := `
+		DELETE FROM analysis_jobs
+		WHERE job_id = ANY($1)
+		  AND status IN ('completed', 'failed')
+	`
+
+	result, err := tx.ExecContext(ctx, jobQuery, pq.Array(jobIDs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete jobs: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Return list of actually deleted job IDs
+	deletedJobs := make([]string, 0, rowsAffected)
+	for jobID := range jobsFound {
+		deletedJobs = append(deletedJobs, jobID)
+	}
+
+	return deletedJobs, nil
+}
+

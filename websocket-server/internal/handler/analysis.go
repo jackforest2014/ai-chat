@@ -2,22 +2,29 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/your-org/websocket-server/internal/analyzer"
+	"github.com/your-org/websocket-server/internal/exporter"
 )
 
 // AnalysisHandler handles resume analysis HTTP requests
 type AnalysisHandler struct {
 	analyzer analyzer.ResumeAnalyzer
+	exporter exporter.Exporter
 }
 
 // NewAnalysisHandler creates a new analysis handler instance
-func NewAnalysisHandler(analyzer analyzer.ResumeAnalyzer) *AnalysisHandler {
-	return &AnalysisHandler{analyzer: analyzer}
+func NewAnalysisHandler(analyzer analyzer.ResumeAnalyzer, exp exporter.Exporter) *AnalysisHandler {
+	return &AnalysisHandler{
+		analyzer: analyzer,
+		exporter: exp,
+	}
 }
 
 // HandleAnalyzeResume starts asynchronous resume analysis
@@ -306,4 +313,208 @@ func (h *AnalysisHandler) HandleDeleteJob(w http.ResponseWriter, r *http.Request
 		"message": "Job deleted successfully",
 		"job_id":  jobID,
 	})
+}
+
+// HandleRetryJob retries a failed analysis job
+func (h *AnalysisHandler) HandleRetryJob(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get job ID from query parameter
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Job ID is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Retry the job
+	err := h.analyzer.RetryJob(ctx, jobID)
+	if err != nil {
+		log.Printf("Error retrying job %s: %v", jobID, err)
+
+		// Check for specific error messages
+		if err.Error() == "job not found" || err.Error()[:14] == "job not found:" {
+			respondJSON(w, http.StatusNotFound, map[string]string{"error": "Job not found"})
+			return
+		}
+
+		if err.Error()[:30] == "only failed jobs can be retried" {
+			respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error":   "Cannot retry job",
+				"message": err.Error(),
+			})
+			return
+		}
+
+		respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to retry job"})
+		return
+	}
+
+	log.Printf("Retrying analysis job: %s", jobID)
+
+	respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"success": true,
+		"message": "Job retry started successfully",
+		"job_id":  jobID,
+		"status":  "queued",
+	})
+}
+
+// HandleBatchDeleteJobs deletes multiple analysis jobs in a single operation
+func (h *AnalysisHandler) HandleBatchDeleteJobs(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		JobIDs []string `json:"job_ids"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "Invalid request body",
+			"message": "Request body must be valid JSON with job_ids array",
+		})
+		return
+	}
+
+	// Validate job IDs
+	if len(req.JobIDs) == 0 {
+		respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "Invalid request",
+			"message": "job_ids array cannot be empty",
+		})
+		return
+	}
+
+	if len(req.JobIDs) > 100 {
+		respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "Invalid request",
+			"message": "Maximum 100 jobs can be deleted at once",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Call batch delete
+	result, err := h.analyzer.BatchDeleteJobs(ctx, req.JobIDs)
+	if err != nil {
+		log.Printf("Error batch deleting jobs: %v", err)
+
+		// Check for specific error messages
+		if err.Error()[:24] == "cannot delete" && err.Error()[len(err.Error())-10:] == "processing" {
+			respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error":   "Cannot delete jobs",
+				"message": err.Error(),
+			})
+			return
+		}
+
+		respondJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":   "Deletion failed",
+			"message": "Database transaction failed, no jobs were deleted",
+		})
+		return
+	}
+
+	log.Printf("Batch deleted %d analysis jobs", result.DeletedCount)
+
+	respondJSON(w, http.StatusOK, result)
+}
+
+// HandleExportAnalysis exports analysis results in various formats
+func (h *AnalysisHandler) HandleExportAnalysis(w http.ResponseWriter, r *http.Request) {
+	// Only allow GET requests
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get job ID from query parameter
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "Job ID is required"})
+		return
+	}
+
+	// Get format from query parameter (default to JSON)
+	formatStr := strings.ToLower(r.URL.Query().Get("format"))
+	if formatStr == "" {
+		formatStr = "json"
+	}
+
+	// Validate format
+	var format exporter.Format
+	switch formatStr {
+	case "json":
+		format = exporter.FormatJSON
+	case "csv":
+		format = exporter.FormatCSV
+	case "pdf":
+		format = exporter.FormatPDF
+	case "docx":
+		format = exporter.FormatDOCX
+	default:
+		respondJSON(w, http.StatusBadRequest, map[string]string{
+			"error":   "Invalid format",
+			"message": "Supported formats: json, csv, pdf, docx",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Get the analysis result
+	result, err := h.analyzer.GetResult(ctx, jobID)
+	if err != nil {
+		log.Printf("Error getting analysis result for export: %v", err)
+		if err.Error() == "job is not completed yet" {
+			respondJSON(w, http.StatusBadRequest, map[string]string{
+				"error":   "Analysis not yet completed",
+				"message": "Only completed analysis jobs can be exported",
+			})
+			return
+		}
+		respondJSON(w, http.StatusNotFound, map[string]string{"error": "Result not found"})
+		return
+	}
+
+	// Export to the requested format
+	data, err := h.exporter.Export(ctx, result, format)
+	if err != nil {
+		log.Printf("Error exporting analysis result: %v", err)
+		respondJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":   "Export failed",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Set response headers for file download
+	contentType := h.exporter.GetContentType(format)
+	extension := h.exporter.GetFileExtension(format)
+	fileName := fmt.Sprintf("resume_analysis_%s%s", jobID, extension)
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+
+	// Write the data
+	if _, err := w.Write(data); err != nil {
+		log.Printf("Error writing export data: %v", err)
+	}
+
+	log.Printf("Exported analysis job %s as %s (%d bytes)", jobID, format, len(data))
 }

@@ -41,7 +41,8 @@ A production-ready WebSocket server written in Go for real-time chat application
 - **Q&A Chat Memory** - Semantic matching with embeddings (75% similarity threshold)
 - **Audio Message Support** - Store and retrieve audio messages
 - **Connection Management** - Automatic ping/pong and lifecycle handling
-- **Job Management** - Delete completed/failed analysis jobs with cascade profile deletion
+- **Job Management** - Delete, retry, and batch delete analysis jobs with cascade profile deletion
+- **Export Functionality** - Export analysis results in JSON, CSV, PDF, and DOCX formats
 - **Docker Ready** - Containerized for easy deployment
 
 ## Tech Stack
@@ -398,6 +399,9 @@ Server runs on port **8081** by default.
 | GET | `/api/analysis/user-jobs?user_id=X` | Get user's analysis jobs |
 | GET | `/api/analysis/upload-jobs?upload_id=X` | Get jobs for upload |
 | DELETE | `/api/analysis/delete-job?job_id=X` | Delete job (completed/failed only) |
+| POST | `/api/analysis/batch-delete` | Batch delete multiple jobs (1-100) |
+| POST | `/api/analysis/retry-job?job_id=X` | Retry failed job |
+| GET | `/api/analysis/export?job_id=X&format=Y` | Export analysis (json/csv/pdf/docx) |
 
 **Upload with User ID:**
 ```bash
@@ -443,6 +447,58 @@ curl -X DELETE "http://localhost:8081/api/analysis/delete-job?job_id=job_abc123"
   "message": "Only completed or failed jobs can be deleted"
 }
 ```
+
+**Retry Job:**
+```bash
+curl -X POST "http://localhost:8081/api/analysis/retry-job?job_id=job_abc123"
+```
+
+**Retry Job Response (Success):**
+```json
+{
+  "success": true,
+  "message": "Job reset and queued for retry",
+  "job_id": "job_abc123"
+}
+```
+
+**Batch Delete Jobs:**
+```bash
+curl -X POST http://localhost:8081/api/analysis/batch-delete \
+  -H "Content-Type: application/json" \
+  -d '{"job_ids": ["job_abc123", "job_def456", "job_ghi789"]}'
+```
+
+**Batch Delete Response (Success):**
+```json
+{
+  "success": true,
+  "deleted_count": 3,
+  "deleted_jobs": ["job_abc123", "job_def456", "job_ghi789"],
+  "message": "Successfully deleted 3 job(s)"
+}
+```
+
+**Export Analysis:**
+```bash
+# Export as JSON
+curl "http://localhost:8081/api/analysis/export?job_id=job_abc123&format=json" -o analysis.json
+
+# Export as CSV
+curl "http://localhost:8081/api/analysis/export?job_id=job_abc123&format=csv" -o analysis.csv
+
+# Export as PDF
+curl "http://localhost:8081/api/analysis/export?job_id=job_abc123&format=pdf" -o analysis.pdf
+
+# Export as DOCX
+curl "http://localhost:8081/api/analysis/export?job_id=job_abc123&format=docx" -o analysis.docx
+```
+
+**Supported Export Formats:**
+- `json` - Structured JSON with all profile data
+- `csv` - Tabular format (flattened structure)
+- `pdf` - Professional formatted document
+- `docx` - Microsoft Word document
 
 ### Interview Preparation
 
@@ -752,6 +808,22 @@ kill -9 <PID>
 3. Check for proxy/firewall blocking WebSocket upgrade
 
 ## Changelog
+
+### Version 1.10.0 (2025-12-26)
+- **Batch Delete Jobs** - Delete multiple analysis jobs in a single transaction (1-100 jobs)
+- **Transaction Safety** - Atomic batch operations with PostgreSQL transactions
+- **Array Parameters** - Efficient batch operations using `pq.Array()` and `ANY()` syntax
+
+### Version 1.9.0 (2025-12-26)
+- **Export Analysis Results** - Export to JSON, CSV, PDF, and DOCX formats
+- **PDF Generation** - Professional formatted documents with `gofpdf`
+- **DOCX Generation** - Microsoft Word documents with `nguyenthenguyen/docx`
+- **Modular Exporter** - Clean architecture with format-specific exporters
+
+### Version 1.8.0 (2025-12-26)
+- **Job Retry** - Retry failed analysis jobs from the profile page
+- **Job Reset** - Automatic cleanup and reset of job status and progress
+- **Reprocessing** - Complete reanalysis from scratch with fresh job state
 
 ### Version 1.7.0 (2025-11-28)
 - **Delete Analysis Job** - New endpoint to delete completed/failed jobs
